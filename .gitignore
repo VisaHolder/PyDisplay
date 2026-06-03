@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *.pyo
 
+# PyInstaller build artifacts (the shipped PyDisplay.exe lives at the repo root)
+build/
+dist/
+
 # PyDisplay runtime data (stored in %APPDATA%\PyDisplay)
 PyDisplay_pos.json
 PyDisplay_theme_*.json

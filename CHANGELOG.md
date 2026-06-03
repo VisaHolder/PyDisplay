@@ -4,6 +4,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.0.9] - 2026-06-03
+
+### Fixed
+- **MIN GHz randomly dropping to 0.00 and staying there.** `get_cpu_freq_ghz()` derives the clock from WMI's `PercentProcessorPerformance`, a sampled counter that occasionally glitches to `0`. That produced a valid `0.0` GHz reading (not `None`), which the session min-tracker folded in as a new low — and since the min only ever decreases, it stuck at `0.00` for the rest of the session. The longer the app ran, the more likely it was to catch one of these glitches. The frequency reader now treats a non-positive sample as "no data," and the min/max fold ignores non-positive values defensively.
+- **MIN °C could stick to 0 the same way.** Applied the identical guard to the GPU temperature min/max tracker so a momentary `0` from the OHM/LHM sensor fallback can no longer lock the recorded minimum to 0.
+
+### Changed
+- **Version bumped to 1.0.9.**
+
+---
+
+## [1.0.8] - 2026-04-17
+
+### Changed
+- **Aggressive Memory Clean significantly expanded** — the Aggressive mode now runs 7 additional steps on top of the Safe sequence and the original standby-list purges:
+  1. **Second modified-page flush** — standby purge releases pages that immediately become dirty; a second flush catches them.
+  2. **Second CombinePhysMem pass** — pages freed by the standby purge are now combinable; a second pass recovers additional duplicate pages.
+  3. **Python garbage collection** — forces a full generational GC cycle (`gc.collect(2)`) to reclaim Python-managed memory before the OS sees it.
+  4. **Own-process working set trim** — PyDisplay trims its own working set and resets its working-set size limits so its own RAM footprint is minimised immediately after cleaning.
+  5. **Final heap compaction** — a second heap-compact pass runs after all the above to pick up any newly freed heap blocks.
+- **Version bumped to 1.0.8.**
+
+---
+
 ## [1.0.7] - 2026-03-08
 
 ### Added

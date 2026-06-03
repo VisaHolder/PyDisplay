@@ -109,7 +109,7 @@ _THEME_DIR  = _APP_DIR   # themes live alongside the config
 _FONT           = "Courier New" # single source of truth for the app font
 _BASE_FONT_SIZE = 9             # default font size; all remap logic is relative to this
 _CONFIG_VERSION  = 1             # increment when config schema changes; triggers migration
-_APP_VERSION     = "1.0.7"       # increment on each release; checked against GitHub latest tag
+_APP_VERSION     = "1.0.9"       # increment on each release; checked against GitHub latest tag
 _GITHUB_REPO     = "reaprrr/PyDisplay"
 
 # Default display section order — defined once, referenced everywhere
@@ -303,6 +303,37 @@ def _mc_run(aggressive=False, log_cb=None):
         _mc_set_mem_list(_MC_MemPurgeLowStandby)
         _log("Purging full standby list…")
         _mc_set_mem_list(_MC_MemPurgeStandby)
+
+        # 14. Second modified-page flush — standby purge can dirty pages
+        _log("Re-flushing modified pages (post-standby)…")
+        _mc_set_mem_list(_MC_MemFlushModified)
+
+        # 15. Second combine pass — newly freed pages are now combinable
+        _log("Second combine pass…")
+        ci2 = _MC_COMBINE_INFO()
+        st2 = ntdll.NtSetSystemInformation(_MC_SystemCombinePhysMem, ctypes.byref(ci2), ctypes.sizeof(ci2))
+        if st2 == 0 and ci2.PagesCombined:
+            _log(f"  Combined {ci2.PagesCombined:,} more pages ({ci2.PagesCombined*4//1024} MB)")
+
+        # 16. Force Python garbage collection
+        _log("Collecting Python garbage…")
+        import gc as _gc
+        _gc.collect(2)
+
+        # 17. Trim our own process working set to minimum
+        _log("Trimming own process…")
+        self_h = kernel32.OpenProcess(_MC_PROCESS_QUERY_INFO | _MC_PROCESS_SET_QUOTA,
+                                      False, kernel32.GetCurrentProcessId())
+        if self_h:
+            psapi.EmptyWorkingSet(self_h)
+            kernel32.SetProcessWorkingSetSizeEx(self_h, ctypes.c_size_t(-1), ctypes.c_size_t(-1), 0)
+            kernel32.CloseHandle(self_h)
+
+        # 18. Compact all heaps a second time (aggressive heap trim)
+        _log("Final heap compaction…")
+        n = kernel32.GetProcessHeaps(64, ctypes.byref(heap_arr))
+        for i in range(min(n, 64)):
+            if heap_arr[i]: kernel32.HeapCompact(heap_arr[i], 0)
 
     _, used_after, _ = _mc_get_ram_mb()
     freed = used_before - used_after
@@ -2602,7 +2633,11 @@ def get_cpu_freq_ghz():
             perf = w.Win32_PerfFormattedData_Counters_ProcessorInformation(Name="_Total")
             if perf:
                 pct = float(perf[0].PercentProcessorPerformance)
-                return (_cpu_base_mhz * pct / 100.0) / 1000.0
+                # PercentProcessorPerformance is a sampled counter that occasionally
+                # glitches to 0; treat a non-positive reading as "no data" rather
+                # than reporting a spurious 0 GHz (which would stick as the min).
+                if pct > 0 and _cpu_base_mhz:
+                    return (_cpu_base_mhz * pct / 100.0) / 1000.0
         finally:
             pythoncom.CoUninitialize()
     except Exception:
@@ -7969,7 +8004,7 @@ class App(tk.Tk):
         self.vram_bar.set(gpu["vram_used"])
         self.gpu_watt_lbl.config(text=f"{gpu['wattage']:.0f}W" if gpu["wattage"] is not None else "N/A")
         self.gpu_temp_lbl.config(text=self._fmt_temp(gpu["temp"])       if gpu["temp"] is not None    else "N/A")
-        if gpu["temp"] is not None:
+        if gpu["temp"] is not None and gpu["temp"] > 0:
             self._gpu_temp_min = min(self._gpu_temp_min, gpu["temp"])
             self._gpu_temp_max = max(self._gpu_temp_max, gpu["temp"])
         self.gpu_temp_max_lbl.config(text=self._fmt_temp(self._gpu_temp_max) if self._gpu_temp_max != float('-inf') else "N/A")
@@ -7978,7 +8013,7 @@ class App(tk.Tk):
 
         # CPU
         self.cpu_usage.set(cpu_pct)
-        if freq_ghz is not None:
+        if freq_ghz is not None and freq_ghz > 0:
             self._freq_min_seen = min(self._freq_min_seen, freq_ghz)
             self._freq_max_seen = max(self._freq_max_seen, freq_ghz)
         self.cpu_freq_max_lbl.config(text=f"{self._freq_max_seen:.2f} GHz" if self._freq_max_seen > 0 else "N/A")
