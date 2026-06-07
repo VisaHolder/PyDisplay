@@ -109,8 +109,8 @@ _THEME_DIR  = _APP_DIR   # themes live alongside the config
 _FONT           = "Courier New" # single source of truth for the app font
 _BASE_FONT_SIZE = 9             # default font size; all remap logic is relative to this
 _CONFIG_VERSION  = 1             # increment when config schema changes; triggers migration
-_APP_VERSION     = "1.0.9"       # increment on each release; checked against GitHub latest tag
-_GITHUB_REPO     = "reaprrr/PyDisplay"
+_APP_VERSION     = "1.1.0"       # increment on each release; checked against GitHub latest tag
+_GITHUB_REPO     = "VisaHolder/PyDisplay"   # account renamed from reaprrr 2026-06-05
 
 # Default display section order — defined once, referenced everywhere
 _DEFAULT_SECTION_ORDER = ["gpu", "cpu", "mem", "net", "disk", "storage"]
@@ -351,13 +351,22 @@ def _read_config():
         return {}
 
 def _write_config(data):
-    """Merge data into the existing config and write it back to disk."""
+    """Merge data into the existing config and write it back to disk.
+
+    Atomic: write to a temp file in the same dir, then os.replace() it over the
+    real config. A crash or power loss mid-write can never truncate/corrupt the
+    live config (which previously caused _read_config to return {} and reset
+    every setting to defaults)."""
     try:
         os.makedirs(_APP_DIR, exist_ok=True)
         existing = _read_config()
         existing.update(data)
-        with open(_CFG_PATH, "w") as _f:
+        _tmp = _CFG_PATH + ".tmp"
+        with open(_tmp, "w") as _f:
             json.dump(existing, _f, indent=2)
+            _f.flush()
+            os.fsync(_f.fileno())
+        os.replace(_tmp, _CFG_PATH)
     except Exception as e:
         _log_error("_write_config", e)
 
@@ -3179,6 +3188,8 @@ class App(tk.Tk):
         self._proc_cache       = (0, 0, 0)   # (procs, threads, handles)
         self._proc_ts          = 0.0
         self._last_snapshot    = None
+        self._tray_active      = None   # {"alive": bool} shared with the tray GPU-updater thread
+        self._tray_icon        = None   # active pystray Icon, so we never spawn two
         self._logging_active   = False
         self._log_after_id     = None
         self._color_gpu       = "#008000"
@@ -3268,6 +3279,16 @@ class App(tk.Tk):
 
     def _on_close(self):
         self._closing = True
+        # Stop the tray GPU-updater daemon and tear down any live tray icon so
+        # neither keeps spinning against a destroyed window.
+        if self._tray_active is not None:
+            self._tray_active["alive"] = False
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+            self._tray_icon = None
         self._save_position()
         self.destroy()
 
@@ -3277,6 +3298,10 @@ class App(tk.Tk):
 
     def _hide_to_tray(self):
         """Hide the overlay and show a system-tray icon to restore it."""
+        # Already minimised to tray — don't spawn a second icon/updater thread.
+        if self._tray_icon is not None:
+            self.withdraw()
+            return
         try:
             import pystray
             from PIL import Image, ImageDraw, ImageFont
@@ -3329,10 +3354,12 @@ class App(tk.Tk):
                 return img
 
             def _restore(icon, item):
+                self._tray_icon = None
                 icon.stop()
                 self.after(0, self.deiconify)
 
             def _quit(icon, item):
+                self._tray_icon = None
                 icon.stop()
                 self.after(0, lambda: (self._save_position(), self.destroy()))
 
@@ -3343,10 +3370,12 @@ class App(tk.Tk):
 
             initial_img = _make_icon_image(0 if _show_gpu else None)
             icon = pystray.Icon("PyDisplay", initial_img, "PyDisplay", menu)
+            self._tray_icon = icon
 
             # Background thread: update icon image with live GPU % every second
             if _show_gpu:
                 _tray_active = {"alive": True}
+                self._tray_active = _tray_active
 
                 def _gpu_icon_updater():
                     # Wait until the icon is fully running before sending updates
@@ -3367,11 +3396,13 @@ class App(tk.Tk):
 
                 def _patched_restore(icon, item):
                     _tray_active["alive"] = False
+                    self._tray_icon = None
                     icon.stop()
                     self.after(0, self.deiconify)
 
                 def _patched_quit(icon, item):
                     _tray_active["alive"] = False
+                    self._tray_icon = None
                     icon.stop()
                     self.after(0, lambda: (self._save_position(), self.destroy()))
 
@@ -3563,6 +3594,8 @@ class App(tk.Tk):
 
     def _poll_ctrl(self):
         """Poll Ctrl key state every 50ms via GetAsyncKeyState - no focus needed."""
+        if self._closing:
+            return
         try:
             VK_CONTROL = 0x11
             ctrl_held = bool(_user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
@@ -3696,7 +3729,16 @@ class App(tk.Tk):
             if not pos:
                 raise ValueError("empty config")
             pos = self._migrate_config(pos)
-            self.geometry(f"{pos['w']}x{pos['h']}+{pos['x']}+{pos['y']}")
+            # Geometry restore in its own guard: the placement picker writes a
+            # config with ONLY x/y (no w/h), and a partial/corrupt file could be
+            # missing any key. A KeyError here used to abort the whole try block,
+            # silently resetting theme/refresh/click-through/tray to defaults.
+            try:
+                _w = int(pos.get("w", 320)); _h = int(pos.get("h", 600))
+                _x = int(pos.get("x", 100)); _y = int(pos.get("y", 100))
+                self.geometry(f"{_w}x{_h}+{_x}+{_y}")
+            except Exception:
+                pass
             saved_theme = pos.get("active_theme", "")
             if saved_theme and os.path.exists(saved_theme):
                 self._active_theme_path = saved_theme
@@ -7257,10 +7299,16 @@ class App(tk.Tk):
             ver = None
             try:
                 import pynvml as _nv
-                _nv.nvmlInit()
+                # Reuse the global nvmlInit() done at startup. A second
+                # init+shutdown here just churns the shared NVML refcount for no
+                # reason; only init locally as a fallback if it wasn't available.
+                _own = False
+                if not NVIDIA_AVAILABLE:
+                    _nv.nvmlInit(); _own = True
                 v = _nv.nvmlSystemGetDriverVersion()
                 ver = v.decode() if isinstance(v, bytes) else str(v)
-                _nv.nvmlShutdown()
+                if _own:
+                    _nv.nvmlShutdown()
             except Exception:
                 pass
             lbl = f"↗ {ver}" if ver else "↗ DRIVERS"
@@ -7689,7 +7737,13 @@ class App(tk.Tk):
                 run_btn.bind("<Leave>",    lambda e: run_btn.config(fg=GREEN))
 
             def _thread_run():
-                freed = _work()
+                # Always marshal _done back, even if the cleaner raises — else
+                # the button stays stuck on "RUNNING" with selectors disabled.
+                try:
+                    freed = _work()
+                except Exception as e:
+                    _log_error("_mc_run", e)
+                    freed = 0
                 self.after(0, lambda f=freed: _done(f))
 
             threading.Thread(target=_thread_run, daemon=True).start()
@@ -7904,6 +7958,8 @@ class App(tk.Tk):
             self._ticker_canvas.coords(self._ticker_text_id2, 0, 7)
 
     def _ticker_step(self):
+        if self._closing:
+            return
         try:
             cw   = self._ticker_canvas.winfo_width()
             bbox = self._ticker_canvas.bbox(self._ticker_text_id)
@@ -7922,6 +7978,8 @@ class App(tk.Tk):
 
     def _update_datetime_lbl(self):
         """Show/hide and update the datetime label based on _datetime_format and _datetime_position."""
+        if self._closing:
+            return
         fmt = self._datetime_format
         pos = self._datetime_position
         if fmt == "time":
@@ -7967,13 +8025,16 @@ class App(tk.Tk):
             now_proc = time.time()
             if self._proc_ts == 0.0 or (now_proc - self._proc_ts) >= 120:
                 procs = threads = handles = 0
-                try:
-                    for p in psutil.process_iter(['num_threads', 'num_handles']):
+                for p in psutil.process_iter(['num_threads', 'num_handles']):
+                    # Per-process guard: a single AccessDenied (common on
+                    # Windows for num_handles) must not abort the whole sweep
+                    # and leave a truncated count cached for 120s.
+                    try:
                         procs   += 1
                         threads += p.info['num_threads'] or 0
                         handles += p.info['num_handles'] or 0
-                except Exception:
-                    pass
+                    except Exception:
+                        continue
                 self._proc_cache = (procs, threads, handles)
                 self._proc_ts    = now_proc
             procs, threads, handles = self._proc_cache
@@ -8000,7 +8061,11 @@ class App(tk.Tk):
         # GPU
         self.gpu_name.config(text=gpu["name"])
         self.gpu_usage.set(gpu["usage"])
-        self.vram_bar.max_val = gpu["vram_total"]
+        # Only adopt a real VRAM total. When no NVIDIA GPU is present (AMD/Intel
+        # WMI path or GPUtil missing) vram_total comes back 0, which would make
+        # the bar read "0.0/0 GB" and mis-scale any later real reading.
+        if gpu["vram_total"] and gpu["vram_total"] > 0:
+            self.vram_bar.max_val = gpu["vram_total"]
         self.vram_bar.set(gpu["vram_used"])
         self.gpu_watt_lbl.config(text=f"{gpu['wattage']:.0f}W" if gpu["wattage"] is not None else "N/A")
         self.gpu_temp_lbl.config(text=self._fmt_temp(gpu["temp"])       if gpu["temp"] is not None    else "N/A")
@@ -8027,7 +8092,7 @@ class App(tk.Tk):
         ram_used  = ram.used / (1024**3)
         ram_total = ram.total / (1024**3)
         self._ram_peak_pct = max(self._ram_peak_pct, ram.percent)
-        self.ram_bar.max_val = round(ram_total)
+        self.ram_bar.max_val = ram_total   # unrounded so used can never exceed max
         self.ram_bar.set(ram_used)
         self.ram_used_lbl.config(text=f"{ram_used:.1f} GB")
         self.ram_total_lbl.config(text=f"{ram_total:.0f} GB")
@@ -8045,7 +8110,13 @@ class App(tk.Tk):
         self.net_up.set(net_up)
         self.net_peak_down_lbl.config(text=f"{self._net_peak_down:.2f} MB/s")
         self.net_peak_up_lbl.config(text=f"{self._net_peak_up:.2f} MB/s")
-        self._net_title.config(fg=RED if max(net_down, net_up) / max(net_max, 1) > 0.85 else self._color_net)
+        # Title flags red on sustained high traffic. The old test compared
+        # against net_max (which is itself derived from the current sample, so
+        # the ratio could never exceed ~0.67) and never fired. Compare the live
+        # rate against the session peak instead.
+        _net_now  = max(net_down, net_up)
+        _net_peak = max(self._net_peak_down, self._net_peak_up)
+        self._net_title.config(fg=RED if _net_peak > 1 and _net_now >= _net_peak * 0.85 else self._color_net)
 
         # Disk I/O
         self._disk_peak_read  = max(self._disk_peak_read,  disk_read)

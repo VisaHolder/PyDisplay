@@ -4,6 +4,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.0] - 2026-06-07
+
+### Fixed
+- **Settings could silently reset to defaults on launch.** Geometry was restored with subscript access (`pos['w']`), but the placement picker writes a config containing only `x`/`y` (no `w`/`h`) — and any partial/corrupt config could be missing a key. The resulting `KeyError` aborted the *entire* settings-load block, so theme, refresh rate, click-through, tray, GPU selection and more all reverted to defaults that launch. Geometry restore is now isolated and falls back to sane defaults per field.
+- **"invalid command name" tracebacks on close.** The ticker, clock and Ctrl-poll `after()` loops kept rescheduling after the window was destroyed. They now bail out on close like the main stats poll already did.
+- **Tray updater thread never stopped, and minimizing twice could spawn a second tray icon.** The live-GPU tray updater kept spinning against a dead icon after close; the icon is now torn down (and the thread stopped) on exit, and a second minimize-to-tray no longer creates a duplicate icon.
+- **VRAM bar broke on non-NVIDIA / headless GPUs.** When no NVIDIA card is detected, VRAM total reads `0`; the bar adopted that as its max and showed `0.0/0 GB`, mis-scaling later readings. It now keeps the last real max and ignores a `0` total.
+- **The NETWORK title could never turn red.** The "busy" test compared the live rate against a max derived from that same sample, capping the ratio below the threshold. It now compares against the session peak.
+- **Process / thread / handle counts could read low or stick at zero.** A single `AccessDenied` while iterating processes aborted the whole sweep (Windows commonly denies `num_handles`). Each process is now guarded individually.
+- **GPU driver-version lookup re-initialised NVML** on a background thread while the main reader was live, churning the shared NVML refcount. It now reuses the global init.
+- **Config writes are now atomic** (temp file + `os.replace`), so a crash mid-write can no longer truncate the config and reset every setting.
+- **The in-app update check pointed at the old `reaprrr/PyDisplay` URL** (worked only via GitHub's rename redirect). Now uses `VisaHolder/PyDisplay`.
+
+### Changed
+- **Version bumped to 1.1.0.**
+
+---
+
 ## [1.0.9] - 2026-06-03
 
 ### Fixed
