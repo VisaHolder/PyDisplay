@@ -109,7 +109,7 @@ _THEME_DIR  = _APP_DIR   # themes live alongside the config
 _FONT           = "Courier New" # single source of truth for the app font
 _BASE_FONT_SIZE = 9             # default font size; all remap logic is relative to this
 _CONFIG_VERSION  = 1             # increment when config schema changes; triggers migration
-_APP_VERSION     = "1.1.0"       # increment on each release; checked against GitHub latest tag
+_APP_VERSION     = "1.1.1"       # increment on each release; checked against GitHub latest tag
 _GITHUB_REPO     = "VisaHolder/PyDisplay"   # account renamed from reaprrr 2026-06-05
 
 # Default display section order — defined once, referenced everywhere
@@ -206,10 +206,12 @@ def _mc_get_ram_mb():
     free  = ms.ullAvailPhys / (1024**2)
     return total, total - free, free
 
-def _mc_run(aggressive=False, log_cb=None):
+def _mc_run(aggressive=False, log_cb=None, clear_clipboard=True):
     """
     Run the full memory cleaning sequence in a background thread.
     log_cb(msg) is called with status lines for the UI to display.
+    clear_clipboard=False is used by the timed auto-cleaner — silently
+    wiping the clipboard on a timer would be data loss, not cleaning.
     Returns MB freed (float).
     """
     def _log(msg):
@@ -226,22 +228,26 @@ def _mc_run(aggressive=False, log_cb=None):
                  "SeMaintainVolumePrivilege", "SeProfileSingleProcessPrivilege"):
         _mc_enable_privilege(priv)
 
+    def _trim_all_working_sets():
+        """EmptyWorkingSet + min-size every accessible process. Returns count trimmed."""
+        pid_arr   = (ctypes.c_ulong * 8192)()
+        bytes_ret = ctypes.c_ulong()
+        psapi.EnumProcesses(ctypes.byref(pid_arr), ctypes.sizeof(pid_arr), ctypes.byref(bytes_ret))
+        n_pids = bytes_ret.value // ctypes.sizeof(ctypes.c_ulong)
+        ok = 0
+        for i in range(n_pids):
+            pid = pid_arr[i]
+            if not pid: continue
+            h = kernel32.OpenProcess(_MC_PROCESS_QUERY_INFO | _MC_PROCESS_SET_QUOTA, False, pid)
+            if h:
+                psapi.EmptyWorkingSet(h)
+                kernel32.SetProcessWorkingSetSizeEx(h, ctypes.c_size_t(-1), ctypes.c_size_t(-1), 0)
+                kernel32.CloseHandle(h); ok += 1
+        return ok
+
     # 2. Flush process working sets
     _log("Flushing process working sets…")
-    pid_arr  = (ctypes.c_ulong * 8192)()
-    bytes_ret = ctypes.c_ulong()
-    psapi.EnumProcesses(ctypes.byref(pid_arr), ctypes.sizeof(pid_arr), ctypes.byref(bytes_ret))
-    n_pids = bytes_ret.value // ctypes.sizeof(ctypes.c_ulong)
-    ok = 0
-    for i in range(n_pids):
-        pid = pid_arr[i]
-        if not pid: continue
-        h = kernel32.OpenProcess(_MC_PROCESS_QUERY_INFO | _MC_PROCESS_SET_QUOTA, False, pid)
-        if h:
-            psapi.EmptyWorkingSet(h)
-            kernel32.SetProcessWorkingSetSizeEx(h, ctypes.c_size_t(-1), ctypes.c_size_t(-1), 0)
-            kernel32.CloseHandle(h); ok += 1
-    _log(f"  Trimmed {ok} processes")
+    _log(f"  Trimmed {_trim_all_working_sets()} processes")
 
     # 3. System working set
     _log("Flushing system working set…")
@@ -292,10 +298,11 @@ def _mc_run(aggressive=False, log_cb=None):
     try: ctypes.windll.dnsapi.DnsFlushResolverCache()
     except Exception: pass
 
-    # 11. Clipboard
-    _log("Clearing clipboard…")
-    u32 = ctypes.windll.user32
-    if u32.OpenClipboard(None): u32.EmptyClipboard(); u32.CloseClipboard()
+    # 11. Clipboard (manual cleans only — see clear_clipboard docstring note)
+    if clear_clipboard:
+        _log("Clearing clipboard…")
+        u32 = ctypes.windll.user32
+        if u32.OpenClipboard(None): u32.EmptyClipboard(); u32.CloseClipboard()
 
     # 12+13. Aggressive: standby lists
     if aggressive:
@@ -304,7 +311,12 @@ def _mc_run(aggressive=False, log_cb=None):
         _log("Purging full standby list…")
         _mc_set_mem_list(_MC_MemPurgeStandby)
 
-        # 14. Second modified-page flush — standby purge can dirty pages
+        # 14. Second working-set sweep — purging the standby list faults pages
+        # back into other processes' working sets; re-trimming reclaims them.
+        _log("Re-trimming working sets (post-standby)…")
+        _log(f"  Re-trimmed {_trim_all_working_sets()} processes")
+
+        # 15. Second modified-page flush — standby purge can dirty pages
         _log("Re-flushing modified pages (post-standby)…")
         _mc_set_mem_list(_MC_MemFlushModified)
 
@@ -3205,6 +3217,11 @@ class App(tk.Tk):
         self._temp_unit        = "C"    # "C" or "F"
         self._refresh_ms       = 1000   # main poll interval: 500 / 1000 / 2000 / 5000
         self._log_interval_ms  = 15000  # log write interval: 5000 / 15000 / 30000 / 60000
+        self._autoclean_on          = False   # timed memory cleaner enabled
+        self._autoclean_interval_min = 30     # minutes between auto-cleans: 5 / 15 / 30 / 60
+        self._autoclean_aggressive  = False   # auto-clean uses aggressive sequence
+        self._autoclean_after_id    = None    # scheduled tk.after id for the timer
+        self._mc_busy               = False   # shared guard: manual + auto never overlap
         self._position_locked  = False
         self._click_through_on = True   # click-through active by default
         self._minimize_to_tray = False  # minimize to tray instead of close
@@ -3268,6 +3285,8 @@ class App(tk.Tk):
                 except Exception:
                     self.geometry(f"{self.winfo_width()}x{self.winfo_reqheight()}+{self.winfo_x()}+{self.winfo_y()}")
             self.after(100, _reapply_pos)
+            # Arm the timed memory cleaner if it was left enabled
+            self._schedule_autoclean()
         self.after(50, _do_restore)
         self._poll()
         self.bind("<ButtonPress-1>", self._drag_start)
@@ -3695,6 +3714,9 @@ class App(tk.Tk):
                 "section_order":   list(self._section_order),
                 "refresh_ms":      self._refresh_ms,
                 "log_interval_ms": self._log_interval_ms,
+                "autoclean_on":           self._autoclean_on,
+                "autoclean_interval_min": self._autoclean_interval_min,
+                "autoclean_aggressive":   self._autoclean_aggressive,
                 "always_on_top":   bool(self.wm_attributes("-topmost")),
                 "temp_unit":       self._temp_unit,
                 "click_through":   self._click_through_on,
@@ -3753,6 +3775,9 @@ class App(tk.Tk):
                 self._section_order = _merged
             self._refresh_ms      = int(pos.get("refresh_ms",      1000))
             self._log_interval_ms = int(pos.get("log_interval_ms", 15000))
+            self._autoclean_on           = bool(pos.get("autoclean_on", False))
+            self._autoclean_interval_min = int(pos.get("autoclean_interval_min", 30))
+            self._autoclean_aggressive   = bool(pos.get("autoclean_aggressive", False))
             if "always_on_top" in pos:
                 self.wm_attributes("-topmost", bool(pos["always_on_top"]))
             self._click_through_on  = bool(pos.get("click_through",    True))
@@ -3821,6 +3846,9 @@ class App(tk.Tk):
                 # Behaviour
                 "refresh_ms":      self._refresh_ms,
                 "log_interval_ms": self._log_interval_ms,
+                "autoclean_on":           self._autoclean_on,
+                "autoclean_interval_min": self._autoclean_interval_min,
+                "autoclean_aggressive":   self._autoclean_aggressive,
                 "always_on_top":   bool(self.wm_attributes("-topmost")),
                 "opacity":         round(float(self.wm_attributes("-alpha")), 2),
                 "click_through":   self._click_through_on,
@@ -3884,6 +3912,10 @@ class App(tk.Tk):
             # Apply behaviour
             self._refresh_ms      = int(data.get("refresh_ms",      self._refresh_ms))
             self._log_interval_ms = int(data.get("log_interval_ms", self._log_interval_ms))
+            self._autoclean_on           = bool(data.get("autoclean_on",           self._autoclean_on))
+            self._autoclean_interval_min = int(data.get("autoclean_interval_min", self._autoclean_interval_min))
+            self._autoclean_aggressive   = bool(data.get("autoclean_aggressive",   self._autoclean_aggressive))
+            self._schedule_autoclean()
             self.wm_attributes("-topmost", bool(data.get("always_on_top", False)))
             self.wm_attributes("-alpha",   float(data.get("opacity", 1.0)))
             self._click_through_on  = bool(data.get("click_through",    True))
@@ -7096,6 +7128,8 @@ class App(tk.Tk):
                                    "                   — safe for games & browsers")
         _row("Aggressive Clean",   "All Safe steps + standby list purge & memory\n"
                                    "                   compression — may cause brief stutter")
+        _row("⏱ AUTO",             "Timed auto-clean every 5 / 15 / 30 / 60 min\n"
+                                   "                   — runs the selected mode, persists across restarts")
 
         _section("  ·  Settings")
         _row("START WITH WINDOWS", "Add / remove Windows startup entry")
@@ -7538,6 +7572,59 @@ class App(tk.Tk):
             "# Ctrl+Click to open")
 
 
+    # ── Timed auto-cleaner ────────────────────────────────────────────────────
+    def _schedule_autoclean(self):
+        """(Re)arm the timed memory cleaner from current settings. Safe to call
+        any time — cancels any pending tick first, then re-arms only if enabled."""
+        if getattr(self, "_autoclean_after_id", None) is not None:
+            try: self.after_cancel(self._autoclean_after_id)
+            except Exception: pass
+            self._autoclean_after_id = None
+        if self._autoclean_on:
+            ms = max(1, int(self._autoclean_interval_min)) * 60 * 1000
+            self._autoclean_after_id = self.after(ms, self._autoclean_tick)
+
+    def _autoclean_tick(self):
+        """Fire one timed clean off-thread, then reschedule the next."""
+        self._autoclean_after_id = None
+        if not self._autoclean_on:
+            return
+        # If a manual (or previous auto) clean is still running, skip this round
+        # and just re-arm — never run two cleaners at once.
+        if self._mc_busy:
+            self._schedule_autoclean()
+            return
+        self._mc_busy = True
+        aggressive = self._autoclean_aggressive
+
+        def _work():
+            try:
+                freed = _mc_run(aggressive=aggressive, clear_clipboard=False)
+            except Exception as e:
+                _log_error("autoclean", e)
+                freed = 0
+            # App may have closed while the clean ran — after() on a dead
+            # mainloop raises; the busy flag dies with the process anyway.
+            try:
+                self.after(0, lambda f=freed: self._autoclean_done(f))
+            except Exception:
+                pass
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _autoclean_done(self, freed):
+        self._mc_busy = False
+        try:
+            # Toast only on a real, positive reclaim — and not while the
+            # window is hidden/in tray (it would pop at stale coordinates).
+            if freed >= 1 and self.winfo_viewable():
+                txt = (f"{freed/1024:.1f} GB" if freed >= 1000
+                       else f"{freed:,.0f} MB")
+                self._show_toast(f"🧹  Auto-clean freed {txt}")
+        except Exception:
+            pass
+        self._schedule_autoclean()
+
     def _mem_clean_popup(self):
         """Open the memory cleaner popup with Safe / Aggressive mode selection inside."""
         # If already open, raise it
@@ -7618,11 +7705,16 @@ class App(tk.Tk):
             else:
                 mode_desc.config(text="Gaming-friendly. No stutters.")
 
-        # Patch _set_mode to also update desc
+        # Patch _set_mode to also update desc (and keep an active auto-timer in sync)
         _orig_set_mode = _set_mode
         def _set_mode(aggressive):
             _orig_set_mode(aggressive)
             _update_desc()
+            if self._autoclean_on:
+                self._autoclean_aggressive = aggressive
+                self._save_position()
+                try: _refresh_auto_ui()
+                except NameError: pass
         safe_sel.bind("<Button-1>", lambda e: _set_mode(False) if not _running["v"] else None)
         aggr_sel.bind("<Button-1>", lambda e: _set_mode(True)  if not _running["v"] else None)
 
@@ -7648,6 +7740,74 @@ class App(tk.Tk):
                            font=(_FONT, _BASE_FONT_SIZE, "bold"), anchor="w")
             val.pack(side="left", padx=(4, 0))
             _fields[key] = val
+
+        # ── Auto-clean (timed) ────────────────────────────────────────────────
+        tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", pady=(8, 6))
+
+        auto_row = tk.Frame(inner, bg=PANEL)
+        auto_row.pack(fill="x")
+        tk.Label(auto_row, text="⏱ AUTO", bg=PANEL, fg=SUBTEXT,
+                 font=(_FONT, _BASE_FONT_SIZE - 2, "bold")).pack(side="left")
+        auto_toggle = tk.Label(auto_row, bg=BORDER,
+                               font=(_FONT, _BASE_FONT_SIZE - 2, "bold"),
+                               cursor="hand2", padx=8, pady=2)
+        auto_toggle.pack(side="right")
+
+        interval_row = tk.Frame(inner, bg=PANEL)
+        interval_row.pack(fill="x", pady=(4, 0))
+        _int_chips = {}
+
+        auto_status = tk.Label(inner, text="", bg=PANEL, fg=SUBTEXT,
+                               font=(_FONT, _BASE_FONT_SIZE - 3), anchor="w")
+        auto_status.pack(fill="x", pady=(3, 0))
+
+        def _refresh_auto_ui():
+            on = self._autoclean_on
+            auto_toggle.config(text=("● ON" if on else "○ OFF"),
+                               fg=(GREEN if on else SUBTEXT))
+            for mins, chip in _int_chips.items():
+                sel = (mins == self._autoclean_interval_min)
+                chip.config(fg=(self._color_tools if sel else SUBTEXT),
+                            bg=(DIM if sel else BORDER))
+            if on:
+                auto_status.config(
+                    text=f"Every {self._autoclean_interval_min} min · "
+                         f"{'aggressive' if self._autoclean_aggressive else 'safe'} mode")
+            else:
+                auto_status.config(text="Timed cleaning is off")
+
+        def _toggle_auto():
+            self._autoclean_on = not self._autoclean_on
+            if self._autoclean_on:
+                # Lock in whichever mode is selected above for the timer
+                self._autoclean_aggressive = _mode["aggressive"]
+            self._schedule_autoclean()
+            self._save_position()
+            _refresh_auto_ui()
+        auto_toggle.bind("<Button-1>", lambda e: _toggle_auto())
+        auto_toggle.bind("<Enter>", lambda e: auto_toggle.config(fg=GREEN))
+        auto_toggle.bind("<Leave>", lambda e: _refresh_auto_ui())
+
+        def _set_interval(mins):
+            self._autoclean_interval_min = mins
+            if self._autoclean_on:
+                self._autoclean_aggressive = _mode["aggressive"]
+                self._schedule_autoclean()
+            self._save_position()
+            _refresh_auto_ui()
+
+        for mins in (5, 15, 30, 60):
+            chip = tk.Label(interval_row, text=f"{mins}m", bg=BORDER, fg=SUBTEXT,
+                            font=(_FONT, _BASE_FONT_SIZE - 2, "bold"),
+                            cursor="hand2", padx=8, pady=2)
+            chip.pack(side="left", padx=(0, 4))
+            chip.bind("<Button-1>", lambda e, m=mins: _set_interval(m))
+            _int_chips[mins] = chip
+
+        _refresh_auto_ui()
+        # If the timer is already running aggressive, reflect that in the selector
+        if self._autoclean_on and self._autoclean_aggressive:
+            _set_mode(True)
 
         # ── Bottom bar ────────────────────────────────────────────────────────
         tk.Frame(dlg, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(8, 0))
@@ -7688,7 +7848,13 @@ class App(tk.Tk):
         def _start_clean():
             if _running["v"]:
                 return
+            if self._mc_busy:
+                # A timed auto-clean is mid-flight — tell the user instead of
+                # silently eating the click.
+                spin_lbl.config(text="⏳  Auto-clean in progress — try again shortly", fg=SUBTEXT)
+                return
             _running["v"] = True
+            self._mc_busy = True
             aggressive = _mode["aggressive"]
             accent = self._color_tools
 
@@ -7711,6 +7877,7 @@ class App(tk.Tk):
 
             def _done(freed):
                 _running["v"] = False
+                self._mc_busy = False
                 try:
                     if _spin_job[0]: self.after_cancel(_spin_job[0])
                 except Exception:

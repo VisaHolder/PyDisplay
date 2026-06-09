@@ -10,7 +10,7 @@ A lightweight, customisable Windows system stats overlay built with Python and t
 - **Font size scaling** — resize all text from a single slider
 - **Section management** — show, hide, collapse, and reorder sections via drag-and-drop in Settings
 - **Horizontal & vertical layouts** — switch between compact side-by-side and stacked views
-- **Memory Cleaner** — built-in RAM cleaner (Safe & Aggressive modes) accessible via the Memory Tools dropdown; covers all operations from Memory Reduct v3.5.2 and more
+- **Memory Cleaner** — built-in RAM cleaner (Safe & Aggressive modes) accessible via the Memory Tools dropdown; covers every operation from Mem Reduct and more, plus an optional timed auto-clean (5 / 15 / 30 / 60 min)
 - **Speed test** — built-in download/upload/ping test (no extra dependencies)
 - **IP lookup** — one-click public IP + geolocation
 - **Logging** — periodic snapshots of all stats to a local text file
@@ -36,7 +36,7 @@ A pre-compiled `.exe` is available for users who don't have Python installed.
 
 ### From Source (Python)
 ```bash
-git clone https://github.com/reaprrr/PyDisplay.git
+git clone https://github.com/VisaHolder/PyDisplay.git
 cd PyDisplay
 python PyDisplay.pyw
 ```
@@ -96,7 +96,8 @@ Click **▶ TOOLS** in the Network section to expand:
 Click **▶ TOOLS** in the Memory section to expand:
 - **🧹 MEMORY CLEAN** — opens the Memory Cleaner popup
   - **Safe Clean** — trims process working sets, flushes modified pages & file system/registry caches, signals a low-memory event, compacts process heaps, flushes DNS cache, and clears the clipboard; safe for games and browsers
-  - **Aggressive Clean** — all Safe steps, plus standby list purge (low-priority then full), a second modified-page flush, a second memory-page combine pass, a Python GC cycle, own-process working set trim, and a final heap compaction (may cause a brief stutter on first run)
+  - **Aggressive Clean** — all Safe steps, plus standby list purge (low-priority then full), a second full working-set sweep, a second modified-page flush, a second memory-page combine pass, a Python GC cycle, own-process working set trim, and a final heap compaction (may cause a brief stutter on first run)
+  - **⏱ AUTO** — timed auto-clean: toggle it on and pick an interval (5 / 15 / 30 / 60 min); it runs whichever mode is selected on a background thread, shows a toast with how much was freed, and persists across restarts
   - Live step-by-step output log with before/after RAM usage and GB freed
 
 ---

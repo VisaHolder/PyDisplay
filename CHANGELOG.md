@@ -4,6 +4,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.1] - 2026-06-09
+
+### Added
+- **Timed auto-cleaner.** The Memory Cleaner popup now has an `⏱ AUTO` section: toggle it on and pick an interval (5 / 15 / 30 / 60 min) and the cleaner fires on a background thread on that schedule, running whichever mode (Safe / Aggressive) is selected. A toast reports how much was freed each run. The setting persists across restarts (and through Settings export/import) and re-arms automatically on launch. A shared busy-guard ensures a timed run and a manual run can never overlap.
+- **Second working-set sweep in Aggressive mode.** Purging the standby list faults pages back into other processes' working sets; Aggressive now re-runs the full `EmptyWorkingSet` sweep after the standby purge to reclaim them (previously only the app's own process was re-trimmed).
+
+### Fixed
+- **Timed auto-clean no longer wipes the clipboard.** The cleaning sequence clears the clipboard as one of its steps — fine for a manual RUN, data loss on a timer. Auto-clean runs now skip that step; manual cleans still clear it.
+- **No more crash-on-exit race.** If the app closed while a timed clean was mid-flight, the worker thread's marshal back to the UI hit a dead mainloop and raised. Now guarded.
+- **No more "freed -123 MB" toast.** RAM usage can measure higher after a clean (apps re-fault pages mid-measure); the toast now only shows for a real positive reclaim.
+- **No phantom toast while minimized to tray.** The auto-clean toast positioned itself on the hidden window's stale coordinates; it's now skipped unless the window is actually visible.
+- **RUN button no longer silently dead during a timed clean.** Clicking RUN while an auto-clean is mid-flight now shows "⏳ Auto-clean in progress" instead of eating the click.
+
+### Changed
+- **Version bumped to 1.1.1.**
+
+---
+
 ## [1.1.0] - 2026-06-07
 
 ### Fixed
