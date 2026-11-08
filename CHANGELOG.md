@@ -4,6 +4,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.2] - 2026-11-07
+
+### Changed — full rebuild
+- **PyDisplay is now a native Windows app (C# / .NET 10, WPF) instead of a Python/tkinter script.** One self-contained exe: no Python, no .NET, no dependency manager. The Python version is kept on the `python-v1` branch.
+- **New look.** Sharp fonts (Cascadia Mono / Consolas), readable colours, one-line header with a single ≡ menu instead of a row of buttons, sharp on scaled (125 % / 150 %) screens.
+- **Three styles** — rows, graphs (60-second graphs, per-core bars), compact — each **vertical or horizontal** (horizontal compact is a single slim strip).
+- **The overlay never changes size** while running: every value has a fixed-width slot.
+- **New settings window** (look, info, sections, behaviour, theme, about) and **tools window** (RAM cleaner, speed test, IP lookup, logging), all in the same clean style.
+- **Font picker** (only fonts installed on the PC), size, background see-through, °C/°F.
+- **Themes:** six built-in, every colour editable by hex, named saved themes, import of 1.x themes.
+
+### Added
+- GPU power out of the card's limit, core clock, fan speed, video-encoder load (OBS).
+- Per-core CPU load, top app by CPU and by RAM, pagefile use, live ping, data used this session, uptime, date.
+- Every extra line can be switched on/off; anything the PC can't read hides itself.
+- Fold a section by clicking its title; reorder/hide sections in settings.
+- Start with Windows (repairs itself if the exe is moved), tray icon with live stats, lock position, GPU picker.
+- Export / import / reset settings, check for updates, **remove PyDisplay from this PC**.
+- First launch brings over 1.x settings and themes and shows how to use the overlay.
+- Opening PyDisplay while it's already running brings the running copy to the front.
+
+### Fixed (from 1.1.1)
+- **RAM cleaner:** the "flush registry cache" step used the wrong Windows call (info class 158 instead of 155) and did nothing; the "low-memory event" step used an obsolete call (74) and did nothing — fixed / removed.
+- **RAM cleaner:** never checked for admin, so most system steps silently failed. Now it says which steps were skipped and offers "restart as admin".
+- **Auto-clean** no longer trims a running game's memory: it waits while a fullscreen game is in front.
+- Settings that can't be read are backed up (`settings.json.bad`) instead of being overwritten; a read-only portable folder falls back to AppData.
+
+### Notes
+- The 1.x in-app updater can't install this version (it only knew how to swap a .pyw file). Download `PyDisplay.exe` from the release page; your settings come over automatically.
+
+---
+
 ## [1.1.1] - 2026-06-09
 
 ### Added
