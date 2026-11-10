@@ -107,7 +107,7 @@ internal static class SelfTest
             Check("github latest release", u != null, $"{u?.Tag} newer={Updates.IsNewer(u?.Tag ?? "")}");
         }
         catch (Exception ex) { Check("github latest release", false, ex.Message); }
-        Check("version compare", Updates.IsNewer("v1.1.3") && Updates.IsNewer("v1.2.0") && !Updates.IsNewer("v1.1.1") && !Updates.IsNewer("v1.1.2"));
+        Check("version compare", Updates.IsNewer("v1.1.4") && Updates.IsNewer("v1.2.0") && !Updates.IsNewer("v1.1.2") && !Updates.IsNewer("v1.1.3"));
 
         // v1 theme import into a throwaway settings object
         var imp = new AppSettings();

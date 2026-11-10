@@ -7,7 +7,7 @@ namespace PyDisplay;
 public partial class App : Application
 {
     public static readonly string ShortVersion =
-        Assembly.GetExecutingAssembly().GetName().Version is { } v ? $"{v.Major}.{v.Minor}.{v.Build}" : "1.1.2";
+        Assembly.GetExecutingAssembly().GetName().Version is { } v ? $"{v.Major}.{v.Minor}.{v.Build}" : "1.1.3";
 
     /// <summary>Set by --uitest: blocks side effects (registry, UAC, dialogs, clipboard, tray, speed test).</summary>
     public static bool TestMode;

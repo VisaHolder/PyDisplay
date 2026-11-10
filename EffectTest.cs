@@ -140,13 +140,15 @@ internal static class EffectTest
         Expect("logging stops", !host.Logging);
 
         // start with Windows: real registry, original state restored afterwards
+        // restore the exact raw value afterwards — it may belong to another copy (e.g. PyDisplay 1.x uses the same name)
         App.TestMode = false;
-        bool orig = Startup.Enabled;
+        using var runKey = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", writable: true)!;
+        object? origRaw = runKey.GetValue("PyDisplay");
         Startup.Enabled = true; bool afterOn = Startup.Enabled;
         Startup.Enabled = false; bool afterOff = Startup.Enabled;
-        Startup.Enabled = orig;
+        if (origRaw == null) runKey.DeleteValue("PyDisplay", false); else runKey.SetValue("PyDisplay", origRaw);
         App.TestMode = true;
-        Expect("start with Windows", afterOn && !afterOff, $"restored to {(Startup.Enabled ? "on" : "off")} (was {(orig ? "on" : "off")})");
+        Expect("start with Windows", afterOn && !afterOff && Equals(runKey.GetValue("PyDisplay"), origRaw), $"restored exactly: {origRaw ?? "(none)"}");
 
         W(_fails == 0 ? "ALL PASSED — every setting does something" : $"{_fails} FAILED");
         host.Exit();

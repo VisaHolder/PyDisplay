@@ -4,6 +4,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.3] - 2026-11-09
+
+### Changed
+- **Compact style redesigned as meter bars.** Every line now follows one grid — name, value, small bar, details — so numbers, bars and details each line up in their own column. Network and disk get bars too (relative to their peak). Extra info (clock/fan, top app, pagefile, data used) sits dimmed under the details.
+- **Horizontal strip** is tighter: each section's number slot is only as wide as that section needs.
+
+### Fixed
+- Folding the drives section did nothing in compact mode.
+
+### Changed (tests)
+- The click test no longer fails when someone is using the PC while it runs, and the settings test restores the start-with-Windows entry exactly.
+
+---
+
 ## [1.1.2] - 2026-11-07
 
 ### Changed — full rebuild

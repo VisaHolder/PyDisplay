@@ -64,7 +64,7 @@ public sealed class MenuWindow : Window
         WindowStartupLocation = WindowStartupLocation.Manual;
         Left = -30000;          // measured off-screen first, then moved into place (no flicker)
         Opacity = 0;
-        Deactivated += (_, _) => SafeClose();
+        Deactivated += (_, _) => { if (!App.TestMode) SafeClose(); };   // tests: another app taking focus mustn't close it
         KeyDown += (_, e) => { if (e.Key == Key.Escape) SafeClose(); };
         Closed += (_, _) => { if (_open == this) _open = null; _watch.Stop(); _lastClosed = DateTime.UtcNow; };
 
@@ -72,7 +72,7 @@ public sealed class MenuWindow : Window
         // close on any mouse click outside the menu.
         _watch.Tick += (_, _) =>
         {
-            if (!IsLoaded || _closing) return;
+            if (!IsLoaded || _closing || App.TestMode) return;   // tests: the real mouse (someone using the PC) mustn't close it
             bool down = (GetAsyncKeyState(0x01) & 0x8000) != 0 || (GetAsyncKeyState(0x02) & 0x8000) != 0;
             if (!down) { _armed = true; return; }   // ignore the click that opened us
             if (!_armed || IsMouseOver) return;

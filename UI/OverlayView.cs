@@ -393,9 +393,9 @@ public sealed class OverlayView
         if (S.Collapsed.Contains(key))
         {
             while (p.Children.Count > 1) p.Children.RemoveAt(p.Children.Count - 1);
-            if (S.Style == "compact" && p.Children[0] is DockPanel row && row.Children.Count > 1)
+            if (S.Style == "compact" && p.Children[0] is Panel row && row.Children.Count > 1)
             {
-                row.Children[1].Visibility = Visibility.Collapsed;
+                for (int i = 1; i < row.Children.Count; i++) row.Children[i].Visibility = Visibility.Collapsed;
                 row.Children.Add(Tx("…", T.Dim));
             }
         }
@@ -543,110 +543,158 @@ public sealed class OverlayView
     }
 
     /// <summary>
-    /// Compact: one status-bar line per section — "GPU  0%  33°C  56W  1.5/16G".
-    /// Numbers in normal text, units dimmed, only the main number coloured.
-    /// Values this PC can't read simply don't appear.
+    /// Compact = meter bars: "GPU ▕███░░░▏  2%  36° 59W" — one line per section, a small bar, the main
+    /// percentage, and dim details. Every part sits in a fixed-width slot, so nothing ever shifts.
+    /// Extra info (clock/fan, top app, pagefile, data used) goes on a dim line under the bar
+    /// (or into a dim slot in the horizontal strip).
     /// </summary>
     private void Compact(string key, StackPanel p)
     {
         string a = T.Accent(key);
         bool strip = S.Direction == "horizontal";
-        var chunks = new List<(Func<Snapshot, (string Val, string Unit)?> F, string Val, string Unit)>();
-        Func<Snapshot, string?>? second = null;   // dim extra info: second line (vertical) or extra slot (strip)
-        string secondTpl = "";                     // its widest form, for a fixed-width slot
-        string title;
+        string title = key switch { "gpu" => "GPU", "cpu" => "CPU", "mem" => "RAM", "net" => "NET", "disk" => "DISK", _ => "DRIVE" };
+
+        Func<Snapshot, double?>? bar = null;           // 0..1
+        Func<Snapshot, string>? value = null;          // the main number (defaults to the bar as a %)
+        Func<Snapshot, string?>? detail = null;        // dim text after the %
+        string detailTpl = "";
+        Func<Snapshot, string?>? second = null;        // dim extra-info line
+        string secondTpl = "";
+
         switch (key)
         {
             case "gpu":
-                title = "GPU";
-                chunks.Add((s => s.GpuLoad is { } l ? (Fmt.Num(l, "0"), "%") : null, "100", "%"));
-                chunks.Add((s => s.GpuTemp is null ? null : (Fmt.TempN(s.GpuTemp, Fh), Fh ? "°F" : "°C"), Fh ? "212" : "100", "°C"));
-                if (S.Extra("powerlimit"))
-                    chunks.Add((s => s.GpuPower is { } w ? (s.GpuPowerLimit is { } lim ? $"{Fmt.Num(w, "0")}/{Fmt.Num(lim, "0")}" : Fmt.Num(w, "0"), "W") : null, "999/999", "W"));
-                else
-                    chunks.Add((s => s.GpuPower is { } w ? (Fmt.Num(w, "0"), "W") : null, "999", "W"));
-                chunks.Add((s => s.VramUsed is null ? null : ($"{Fmt.Gb(s.VramUsed)}/{Fmt.Gb(s.VramTotal, "0")}", "G"), "99.9/99", "G"));
+                bar = s => s.GpuLoad / 100;
+                bool lim = S.Extra("powerlimit");
+                detail = s => JoinAll(
+                    s.GpuTemp is null ? null : Fmt.TempN(s.GpuTemp, Fh) + "°",
+                    s.GpuPower is not { } w ? null : Fmt.Num(w, "0") + (lim && s.GpuPowerLimit is { } l ? "/" + Fmt.Num(l, "0") : "") + "W");
+                detailTpl = (Fh ? "212°" : "100°") + "  " + (lim ? "999/999W" : "999W");
                 if (S.Extra("gpuclock") || S.Extra("encoder"))
+                {
                     second = s => JoinAll(
                         S.Extra("gpuclock") && s.GpuClock is not null ? $"{Fmt.Mhz(s.GpuClock)} GHz" : null,
                         S.Extra("gpuclock") && s.GpuFan is { } f ? $"fan {Fmt.Num(f, "0")}%" : null,
                         S.Extra("encoder") && s.GpuEnc is { } e ? $"enc {Fmt.Num(e, "0")}%" : null);
-                secondTpl = JoinAll(S.Extra("gpuclock") ? "9.99 GHz" : null, S.Extra("gpuclock") ? "fan 100%" : null, S.Extra("encoder") ? "enc 100%" : null) ?? "";
+                    secondTpl = JoinAll(S.Extra("gpuclock") ? "9.99 GHz" : null, S.Extra("gpuclock") ? "fan 100%" : null, S.Extra("encoder") ? "enc 100%" : null) ?? "";
+                }
                 break;
             case "cpu":
-                title = "CPU";
-                chunks.Add((s => (Fmt.Num(s.CpuLoad, "0"), "%"), "100", "%"));
-                chunks.Add((s => s.CpuClock is null ? null : (Fmt.Ghz(s.CpuClock), "GHz"), "9.99", "GHz"));
-                chunks.Add((s => (s.Procs.ToString(), " tasks"), "9999", " tasks"));
-                if (S.Extra("topapp")) second = s => s.TopCpuName is null ? null : $"top {Clip(s.TopCpuName)} {Fmt.Pct(s.TopCpuPct)}";
-                secondTpl = "top 00000000000… 100%";
+                bar = s => s.CpuLoad / 100;
+                detail = s => s.CpuClock is null ? null : Fmt.Ghz(s.CpuClock) + "GHz";
+                detailTpl = "9.99GHz";
+                if (S.Extra("topapp"))
+                {
+                    second = s => s.TopCpuName is null ? null : $"top {Clip(s.TopCpuName)} {Fmt.Pct(s.TopCpuPct)}";
+                    secondTpl = "top 00000000000… 100%";
+                }
                 break;
             case "mem":
-                title = "RAM";
-                chunks.Add((s => (Fmt.Num(s.RamPct, "0"), "%"), "100", "%"));
-                chunks.Add((s => ($"{Fmt.Gb(s.RamUsed)}/{Fmt.Gb(s.RamTotal, "0")}", "G"), "99.9/99", "G"));
+                bar = s => s.RamTotal > 0 ? s.RamUsed / s.RamTotal : null;
+                detail = s => $"{Fmt.Gb(s.RamUsed)}/{Fmt.Gb(s.RamTotal, "0")}G";
+                detailTpl = "99.9/99G";
                 if (S.Extra("pagefile") || S.Extra("topapp"))
+                {
                     second = s => JoinAll(
                         S.Extra("topapp") && s.TopMemName != null ? $"top {Clip(s.TopMemName)} {Fmt.Gb(s.TopMemGb)}G" : null,
                         S.Extra("pagefile") ? $"page {Fmt.Gb(s.CommitUsed, "0")}/{Fmt.Gb(s.CommitLimit, "0")}G" : null);
-                secondTpl = JoinAll(S.Extra("topapp") ? "top 00000000000… 99.9G" : null, S.Extra("pagefile") ? "page 999/999G" : null) ?? "";
+                    secondTpl = JoinAll(S.Extra("topapp") ? "top 00000000000… 99.9G" : null, S.Extra("pagefile") ? "page 999/999G" : null) ?? "";
+                }
                 break;
             case "net":
-                title = "NET";
-                chunks.Add((s => ("↓" + RateNum(s.NetDown), RateUnit(s.NetDown)), "↓99999", "M"));
-                chunks.Add((s => ("↑" + RateNum(s.NetUp), RateUnit(s.NetUp)), "↑99999", "M"));
-                if (S.Extra("ping")) chunks.Add((s => s.PingMs is { } ms ? (Fmt.Num(ms, "0"), "ms") : null, "999", "ms"));
-                if (S.Extra("session")) second = s => $"used ↓{Fmt.Bytes(s.SessDown)} ↑{Fmt.Bytes(s.SessUp)}";
-                secondTpl = "used ↓999.9G ↑999.9G";
+                value = s => "↓" + Fmt.RateShort(s.NetDown);
+                bar = s => s.NetPeakDown > 0 ? s.NetDown / s.NetPeakDown : 0;
+                detail = s => JoinAll("↑" + Fmt.RateShort(s.NetUp), S.Extra("ping") && s.PingMs is { } ms ? Fmt.Num(ms, "0") + "ms" : null);
+                detailTpl = "↑99999M" + (S.Extra("ping") ? "  999ms" : "");
+                if (S.Extra("session"))
+                {
+                    second = s => $"used ↓{Fmt.Bytes(s.SessDown)} ↑{Fmt.Bytes(s.SessUp)}";
+                    secondTpl = "used ↓999.9G ↑999.9G";
+                }
                 break;
             case "disk":
-                title = "DISK";
-                chunks.Add((s => ("r " + RateNum(s.DiskRead), RateUnit(s.DiskRead)), "r 99999", "M"));
-                chunks.Add((s => ("w " + RateNum(s.DiskWrite), RateUnit(s.DiskWrite)), "w 99999", "M"));
-                break;
-            default:
-                title = "DRIVE";
+                value = s => Fmt.RateShort((s.DiskRead ?? 0) + (s.DiskWrite ?? 0));
+                bar = s => s.DiskPeakRead + s.DiskPeakWrite > 0 ? ((s.DiskRead ?? 0) + (s.DiskWrite ?? 0)) / (s.DiskPeakRead + s.DiskPeakWrite) : 0;
+                detail = s => JoinAll("r " + Fmt.RateShort(s.DiskRead), "w " + Fmt.RateShort(s.DiskWrite));
+                detailTpl = "r 99999M  w 99999M";
                 break;
         }
 
-        var row = new DockPanel { Margin = strip ? new Thickness(0) : new Thickness(0, F * 0.45, 0, 0) };
-        var t = Tx(title, a, bold: true);
-        Foldable(t, key);
-        if (!strip) t.Width = F * 3.6;
-        t.Margin = new Thickness(0, 0, F * 0.6, 0);
-        t.VerticalAlignment = VerticalAlignment.Top;
-        DockPanel.SetDock(t, Dock.Left);
-        row.Children.Add(t);
+        // ── one grid for every line:  NAME | value | ▕bar▏ | details  (extra line under details) ──
+        double titleW = W("DRIVE") + F * 0.5, valW = W("↓999.9M"), barW = F * 4.2, gap = F * 0.6;
+        double detailX = titleW + valW + gap + barW + gap;
 
-        Panel flow = new StackPanel { Orientation = Orientation.Horizontal };
-        row.Children.Add(flow);
-        p.Children.Add(row);
-
-        if (key == "storage")
+        FrameworkElement Line(string name, string acc, Func<Snapshot, string> val, Func<Snapshot, double?> frac,
+                              Func<Snapshot, string?>? det, string detTpl, bool foldable)
         {
-            flow.Children.Add(Drives(a, d => Chunk(s => s.Drives.FirstOrDefault(x => x.Name == d) is { } x
-                ? (Fmt.Num(x.UsedGb / x.TotalGb * 100, "0"), "% " + d) : null, null, "100", "% " + d), horizontal: true));
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = strip ? new Thickness(0) : new Thickness(0, F * 0.3, 0, 0) };
+            var t = Tx(name, acc, bold: true);
+            if (foldable) Foldable(t, key);
+            t.Width = strip ? double.NaN : titleW;
+            if (strip) t.Margin = new Thickness(0, 0, F * 0.4, 0);
+            var v = Tx("", T.Text);
+            // vertical: one shared column so numbers line up; strip: just as wide as this section needs
+            v.Width = strip ? W(key is "net" ? "↓999.9M" : key == "disk" ? "999.9M" : "100%") : valW;
+            v.TextAlignment = TextAlignment.Right;
+            var b = Bar(acc, false);
+            b.Width = barW; b.Height = F * 0.45; b.Margin = new Thickness(gap, 0, gap, 0);
+            row.Children.Add(t); row.Children.Add(v); row.Children.Add(b);
+            TextBlock? dt = null;
+            if (det != null)
+            {
+                dt = Tx("", T.Sub);
+                dt.Width = W(detTpl);   // exact slot: never grows or shrinks
+                row.Children.Add(dt);
+            }
+            _ups.Add(s2 =>
+            {
+                v.Text = val(s2);
+                b.Value = frac(s2) ?? 0;
+                if (dt != null) dt.Text = det!(s2) ?? "";
+            });
+            return row;
+        }
+
+        if (key == "storage" && S.Collapsed.Contains(key))
+        {
+            // folded: just a clickable title to unfold it again
+            var ft = Tx("DRIVES …", a, bold: true);
+            ft.Margin = strip ? new Thickness(0) : new Thickness(0, F * 0.3, 0, 0);
+            Foldable(ft, key);
+            p.Children.Add(ft);
             return;
         }
-        for (int i = 0; i < chunks.Count; i++)
-            flow.Children.Add(Chunk(chunks[i].F, i == 0 ? a : null, chunks[i].Val, chunks[i].Unit));
-
-        if (second != null && strip)
+        if (key == "storage")
         {
-            var x = Tx("", T.Sub, 0.92);
-            x.Width = W(secondTpl, 0.92);   // exact slot: shorter text pads, longer text is cut with …
-            x.Margin = new Thickness(0, 0, F * 0.75, 0);
-            _ups.Add(s => { var v = second(s); x.Text = v ?? ""; });
-            flow.Children.Add(x);
+            var host = Drives(a, d => Line(d, a,
+                s2 => s2.Drives.FirstOrDefault(z => z.Name == d) is { } x ? Fmt.Pct(x.UsedGb / x.TotalGb * 100) : "",
+                s2 => s2.Drives.FirstOrDefault(z => z.Name == d) is { } x ? x.UsedGb / x.TotalGb : null,
+                s2 => s2.Drives.FirstOrDefault(z => z.Name == d) is { } x ? $"{Fmt.Gb(x.UsedGb, "0")}/{Fmt.Gb(x.TotalGb, "0")}G" : null,
+                "9999/9999G", foldable: true), horizontal: strip);
+            var wrap = new StackPanel { Orientation = Orientation.Horizontal };
+            var dtitle = Tx(strip ? "DRIVES" : "", a, bold: true);
+            Foldable(dtitle, key);
+            if (strip) { dtitle.Margin = new Thickness(0, 0, F * 0.4, 0); wrap.Children.Add(dtitle); }
+            wrap.Children.Add(host);
+            p.Children.Add(wrap);
+            return;
         }
-        if (second != null && !strip)
+
+        p.Children.Add(Line(title, a, value ?? (s2 => bar!(s2) is { } x ? Fmt.Pct(x * 100) : "\u2013"), bar!, detail, detailTpl, foldable: true));
+
+        if (second == null) return;
+        var l = Tx("", strip ? T.Sub : T.Dim);
+        l.Width = W(secondTpl);
+        l.HorizontalAlignment = HorizontalAlignment.Left;
+        _ups.Add(s2 => { var v = second(s2); l.Text = v ?? ""; Show(l, v is not null); });
+        if (strip)
         {
-            var l = Tx("", T.Sub, 0.92);
-            l.Margin = new Thickness(F * 4.2, F * 0.05, 0, 0);
-            // fixed slot sized for its longest form: shows in full, and a long app name can't stretch the overlay
-            l.Width = W(secondTpl, 0.92);
-            l.HorizontalAlignment = HorizontalAlignment.Left;   // a fixed width would otherwise be centred
-            _ups.Add(s => { var v = second(s); l.Text = v ?? ""; Show(l, v is not null); });
+            l.Margin = new Thickness(F * 0.8, 0, 0, 0);
+            ((Panel)p.Children[0]).Children.Add(l);
+        }
+        else
+        {
+            l.Margin = new Thickness(detailX, 0, 0, 0);   // lines up under the details
             p.Children.Add(l);
         }
     }
